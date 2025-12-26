@@ -1,5 +1,7 @@
 # allm - All LLMs
 
+NOTE: this is in the prototype stage, only about an hour into development. 99% of it is written by LLMs with some guidance from me, so it needs quite a bit more polishing before version 1.0
+
 Single unified frontend for all free LLM APIs.
 
 Tired of hitting free-tier limits on different LLM providers? **ALLM** provides:
