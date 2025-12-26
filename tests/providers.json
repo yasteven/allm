@@ -1,0 +1,50 @@
+{
+  "providers": [
+    {
+      "name": "mistral",
+      "main_key": "MISTRAL_API_KEY",
+      "models": [
+        {
+          "model_name": "mistral-small",
+          "model_key": "MISTRAL_SMALL_KEY"
+        },
+        {
+          "model_name": "mistral-medium",
+          "model_key": "MISTRAL_MEDIUM_KEY"
+        },
+        {
+          "model_name": "mistral-large",
+          "model_key": "MISTRAL_LARGE_KEY"
+        }
+      ]
+    },
+    {
+      "name": "openai",
+      "main_key": "OPENAI_API_KEY",
+      "models": [
+        {
+          "model_name": "gpt-4",
+          "model_key": "OPENAI_GPT4_KEY"
+        },
+        {
+          "model_name": "gpt-3.5-turbo",
+          "model_key": "OPENAI_GPT35_KEY"
+        }
+      ]
+    },
+    {
+      "name": "anthropic",
+      "main_key": "ANTHROPIC_API_KEY",
+      "models": [
+        {
+          "model_name": "claude-3-opus",
+          "model_key": "ANTHROPIC_OPUS_KEY"
+        },
+        {
+          "model_name": "claude-3-sonnet",
+          "model_key": "ANTHROPIC_SONNET_KEY"
+        }
+      ]
+    }
+  ]
+}
