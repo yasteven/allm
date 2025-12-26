@@ -1,347 +1,173 @@
+// allm/tests/integration_tests.rs
+
+use allm::{AllmBackend, ApiKeySpec, Provider};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
-
-/// Test configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestConfig
-{   pub providers: Vec<ProviderConfig>
-}
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig
-{   pub name: String
-  , pub main_key: String
-  , pub models: Vec<ModelConfig>
+struct TestConfig
+{ providers: Vec<ProviderTestConfig>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig
-{   pub model_name: String
-  , pub model_key: String
+struct ProviderTestConfig
+{ name: String
+  , main_key: String     // actual key or placeholder
+  , models: Vec<ModelTestConfig>
 }
 
-/// Load test configuration from JSON file
-fn load_test_config(path: &str) 
-  -> Result<TestConfig, Box<dyn std::error::Error>>
-{   let config_str = fs::read_to_string(path)?;
-    let config: TestConfig = serde_json::from_str(&config_str)?;
-    Ok(config)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelTestConfig
+{ model_name: String
+  , model_key: String    // actual key or placeholder
 }
 
-/// Get API key from environment or config
-fn get_api_key(env_var: &str) 
-  -> Result<String, Box<dyn std::error::Error>>
-{   std::env::var(env_var)
-      .map_err(|_| {
-        format!("Environment variable {} not set", env_var)
-          .into()
+/// Load providers.json from tests/ directory
+fn load_test_config() -> TestConfig
+{ let path = "tests/providers.json";
+  let content = fs::read_to_string(path)
+    .expect("Failed to read tests/providers.json – make sure it exists!");
+  serde_json::from_str(&content)
+    .expect("Invalid JSON in tests/providers.json")
+}
+
+
+/// Find a provider config by name
+fn find_provider_config<'a>(config: &'a TestConfig, name: &str)
+  -> Option<&'a ProviderTestConfig>
+{ config.providers.iter().find(|p| p.name == name)
+}
+
+/// Map provider name from JSON to Provider enum
+fn provider_from_name(name: &str) -> Option<Provider>
+{ match name
+  { "mistral"    => Some(Provider::MistralAi)
+  , "openai"     => Some(Provider::OpenAI)
+  , "anthropic"  => Some(Provider::Anthropic)
+  , _            => None
+  }
+}
+
+#[tokio::test]
+async fn test_backend_with_mistral_integration()
+{ let _ = env_logger::builder()
+      .is_test(true)
+      .try_init();
+
+  let config = load_test_config();
+
+  let mistral_config = match find_provider_config(&config, "mistral")
+  { Some(c) => c
+  , None    => panic!("No 'mistral' provider found in tests/providers.json")
+  };
+
+  let provider = provider_from_name(&mistral_config.name)
+    .expect("Unknown provider name in config");
+
+  log::info!("provider = {:?}", provider);
+
+  let mut api_keys = Vec::new();
+
+  // Master key
+  let mkey = mistral_config.main_key.clone();
+  { println!("Using master key from config");
+    api_keys.push(ApiKeySpec
+    { provider // THIS MOVES PROIDER
+    , model: String::new()   // empty = master key
+    , key : mkey
+    })
+  }
+
+  // Per-model keys
+  for model_cfg in &mistral_config.models
+  { let key = model_cfg.model_key.clone();
+    { println!
+      ( "Using key for model '{}'"
+      , model_cfg.model_name
+      );
+      api_keys.push(ApiKeySpec
+      { provider : Provider::MistralAi // KEEP THE HARDCODED MISTRAL ! (we're in mistral_config, dummy!, provider was moved above, do not remove this ever again!)
+      , model: model_cfg.model_name.clone()
+      , key
       })
-}
+    }
+  }
 
-#[tokio::test]
-async fn test_mistral_client_creation()
-{   let client = allm::providers::mistral::MistralClient::new(
-      Some("test-key".to_string())
-    );
-    assert!(client.api_key.is_some());
-}
+  if api_keys.is_empty()
+  { eprintln!("No usable Mistral API keys found in providers.json!");
+    panic!("No API keys available for integration test")
+  }
 
-#[tokio::test]
-async fn test_mistral_set_api_key()
-{   let mut client = allm::providers::mistral::MistralClient::new(
-      None
-    );
-    assert!(client.api_key.is_none());
-    
-    let _ = client.set_api_key("new-key".to_string()).await;
-    assert!(client.api_key.is_some());
-}
+  println!("Collected {} usable API key(s)", api_keys.len());
 
-#[tokio::test]
-#[ignore]
-async fn test_mistral_get_models()
-{   // Load test config
-    let config = match load_test_config(
-      "tests/providers.json"
-    ) {
-      Ok(c) => c,
-      Err(e) => {
-        println!("Warning: Failed to load config: {}", e);
-        return;
+  log::trace!(" // Create backend ...");
+  let backend = AllmBackend::new(None);
+
+  log::trace!(" // Register keys ...");
+  let set_res = backend.set_api_keys(api_keys).await
+    .expect("Failed to queue set_api_keys");
+  let mut set_rx = set_res;
+
+  let set_result = timeout(Duration::from_secs(5), set_rx.recv())
+    .await
+    .expect("Timeout waiting for set_api_keys reply")
+    .expect("set_api_keys channel closed");
+
+  assert!(set_result.is_ok(), "set_api_keys failed: {:?}", set_result.err());
+  println!("API keys successfully registered with backend");
+
+  // Choose model to test
+  let test_model = mistral_config
+    .models
+    .first()
+    .map(|m| m.model_name.clone())
+    .unwrap_or_else(|| "mistral-small-latest".to_string());
+
+  println!("Sending prompt to model: {}", test_model);
+
+  let send_res = backend
+    .send_prompt
+    ( "Say 'TEST SUCCESSFUL' in all caps and nothing else.".to_string()
+    , test_model
+    )
+    .await
+    .expect("Failed to queue send_prompt");
+
+  let mut response_rx = send_res;
+
+  let result = timeout(Duration::from_secs(30), response_rx.recv())
+    .await
+    .expect("Timeout waiting for response")
+    .expect("Response channel closed");
+
+  match result
+  { Ok(text) =>
+    { let trimmed = text.trim();
+      println!("Response ({} chars): {}", trimmed.len(), trimmed);
+      assert!(!trimmed.is_empty(), "Empty response received");
+      if trimmed.contains("TEST SUCCESSFUL")
+      { println!("Integration test passed perfectly!")
       }
-    };
-
-    // Find Mistral config
-    let mistral_config = config.providers
-      .iter()
-      .find(|p| p.name == "mistral");
-
-    if let Some(provider) = mistral_config
-    {   // Try to get API key
-        match get_api_key(&provider.main_key)
-        {   Ok(api_key) => {
-              let client = allm::providers::mistral::MistralClient::new(
-                Some(api_key)
-              );
-              
-              match client.get_available_models().await
-              {   Ok(models) => {
-                    println!("Available Mistral models:");
-                    for model in models
-                    {   println!("  - {}", model);
-                    }
-                    assert!(!models.is_empty());
-                  }
-                , Err(e) => {
-                    println!("Failed to get models: {}", e);
-                  }
-              }
-            }
-          , Err(_) => {
-              println!(
-                "Skipping test: {} not set in environment",
-                provider.main_key
-              );
-            }
-        }
-    } else
-    {   println!("Mistral config not found in providers.json");
     }
+  , Err(e) => panic!("Request failed: {}", e)
+  }
+
+  backend.shutdown().await.expect("Failed to shutdown backend");
+  println!("Backend shut down cleanly");
+  //panic!("Look at the output!");
 }
 
 #[tokio::test]
-#[ignore]
-async fn test_mistral_send_prompt()
-{   // Load test config
-    let config = match load_test_config(
-      "tests/providers.json"
-    ) {
-      Ok(c) => c,
-      Err(e) => {
-        println!("Warning: Failed to load config: {}", e);
-        return;
-      }
-    };
+async fn test_backend_initialization_and_shutdown()
+{ let _ = env_logger::builder()
+      .is_test(true)
+      .try_init();
 
-    // Find Mistral config
-    let mistral_config = config.providers
-      .iter()
-      .find(|p| p.name == "mistral");
+  let backend = AllmBackend::new(None);
+  println!("Backend initialized successfully");
 
-    if let Some(provider) = mistral_config
-    {   // Get API key
-        match get_api_key(&provider.main_key)
-        {   Ok(api_key) => {
-              let client = allm::providers::mistral::MistralClient::new(
-                Some(api_key)
-              );
-              
-              // Use first available model
-              if let Some(model_config) = provider.models.first()
-              {   let model_name = &model_config.model_name;
-                  
-                  match client
-                    .send_prompt("Say hello", model_name)
-                    .await
-                  {   Ok(response) => {
-                        println!(
-                          "Response from {}: {}",
-                          model_name, response
-                        );
-                        assert!(
-                          !response.is_empty(),
-                          "Response should not be empty"
-                        );
-                      }
-                    , Err(e) => {
-                        println!(
-                          "Failed to send prompt: {}", e
-                        );
-                      }
-                  }
-              }
-            }
-          , Err(_) => {
-              println!(
-                "Skipping test: {} not set",
-                provider.main_key
-              );
-            }
-        }
-    } else
-    {   println!("Mistral config not found");
-    }
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_mistral_per_model_keys()
-{   // Load test config
-    let config = match load_test_config(
-      "tests/providers.json"
-    ) {
-      Ok(c) => c,
-      Err(e) => {
-        println!("Warning: Failed to load config: {}", e);
-        return;
-      }
-    };
-
-    // Find Mistral config
-    let mistral_config = config.providers
-      .iter()
-      .find(|p| p.name == "mistral");
-
-    if let Some(provider) = mistral_config
-    {   println!("Testing per-model API keys for Mistral");
-        
-        // Test each model's specific key
-        for model_config in &provider.models
-        {   match get_api_key(&model_config.model_key)
-            {   Ok(api_key) => {
-                  let client = allm::providers::mistral::MistralClient::new(
-                    Some(api_key)
-                  );
-                  
-                  match client
-                    .send_prompt("Test", &model_config.model_name)
-                    .await
-                  {   Ok(response) => {
-                        println!(
-                          "✓ Model {} responded: {}",
-                          model_config.model_name,
-                          &response[..50.min(response.len())]
-                        );
-                      }
-                    , Err(e) => {
-                        println!(
-                          "✗ Model {} failed: {}",
-                          model_config.model_name, e
-                        );
-                      }
-                  }
-                }
-              , Err(_) => {
-                  println!(
-                    "⊘ Skipping {}: {} not set",
-                    model_config.model_name,
-                    model_config.model_key
-                  );
-                }
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_backend_initialization()
-{   let backend = allm::AllmBackend::new(None);
-    println!("Backend created successfully");
-    
-    // Just verify it doesn't panic
-    let _ = backend.shutdown().await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_backend_set_api_keys()
-{   let backend = allm::AllmBackend::new(None);
-    
-    let keys = vec![
-      allm::ApiKeySpec
-      {   provider: allm::Provider::MistralAi
-        , model: "mistral-small".to_string()
-        , key: std::env::var("MISTRAL_API_KEY")
-            .unwrap_or_else(|_| "test-key".to_string())
-      }
-    ];
-
-    let reply_rx = backend.set_api_keys(keys).await;
-    assert!(reply_rx.is_ok());
-
-    let mut rx = reply_rx.unwrap();
-    if let Some(result) = rx.recv().await
-    {   match result
-        {   Ok(_) => println!("API keys set successfully"),
-          , Err(e) => println!("Error: {}", e)
-        }
-    }
-
-    let _ = backend.shutdown().await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_backend_get_models()
-{   let backend = allm::AllmBackend::new(
-      std::env::var("MISTRAL_API_KEY").ok()
-    );
-    
-    let reply_rx = backend.get_model_lists().await;
-    assert!(reply_rx.is_ok());
-
-    let mut rx = reply_rx.unwrap();
-    if let Some(result) = rx.recv().await
-    {   match result
-        {   Ok(models) => {
-              println!("Retrieved {} models", models.len());
-              assert!(!models.is_empty());
-            }
-          , Err(e) => {
-              println!("Error fetching models: {}", e);
-            }
-        }
-    }
-
-    let _ = backend.shutdown().await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_backend_send_prompt()
-{   let mistral_key = std::env::var("MISTRAL_API_KEY")
-      .ok();
-    
-    if mistral_key.is_none()
-    {   println!("Skipping: MISTRAL_API_KEY not set");
-        return;
-    }
-
-    let backend = allm::AllmBackend::new(mistral_key);
-    
-    let reply_rx = backend
-      .send_prompt(
-        "What is 2+2?".to_string(),
-        "mistral-small".to_string()
-      )
-      .await;
-    
-    assert!(reply_rx.is_ok());
-
-    let mut rx = reply_rx.unwrap();
-    match tokio::time::timeout(
-      std::time::Duration::from_secs(15),
-      rx.recv()
-    ).await
-    {   Ok(Some(result)) => {
-          match result
-          {   Ok(response) => {
-                println!("Response: {}", response);
-                assert!(!response.is_empty());
-              }
-            , Err(e) => {
-                println!("API Error: {}", e);
-              }
-          }
-        }
-      , Ok(None) => {
-          println!("Channel closed");
-        }
-      , Err(_) => {
-          println!("Timeout waiting for response");
-        }
-    }
-
-    let _ = backend.shutdown().await;
+  backend.shutdown().await.expect("Backend shutdown failed");
+  println!("Backend shut down cleanly")
 }

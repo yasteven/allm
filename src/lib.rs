@@ -6,6 +6,11 @@ pub mod failover;
 pub mod client;
 use serde::{Deserialize, Serialize};
 
+// Re-export for convenience
+pub use client::AllmBackend;
+pub use error::Error;
+
+
 /*
 
 im making a new async-only rust library called allm  (All LLMs); 

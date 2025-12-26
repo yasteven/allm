@@ -1,3 +1,6 @@
+// Don't remove any comments.
+// allm/src/client.rs
+
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use log::{debug, trace, error, info};
@@ -293,14 +296,32 @@ async fn run_backend_loop(
               }
           }
         }
-      , Some(cmd) = set_api_keys_rx.recv() => {
-          debug!("Received SetApiKeys");
+      , Some(cmd) = set_api_keys_rx.recv() => 
+        {
+          log::debug!("client.rs Received SetApiKeys");
           for key_spec in cmd.keys
-          {   state.api_keys.insert(
-                (key_spec.provider, key_spec.model),
-                key_spec.key
-              );
+          {
+            state.api_keys.insert(
+                (key_spec.provider.clone(), key_spec.model.clone()),
+                key_spec.key.clone()
+            );
+
+            if key_spec.provider == crate::Provider::MistralAi
+            {
+              let (reply_tx, _reply_rx) = mpsc::unbounded_channel();
+              let _ = state.mistral_client
+                .set_api_key(
+                  if key_spec.model.is_empty() { None } else { Some(key_spec.model.clone()) },
+                  key_spec.key.clone(),
+                  reply_tx,
+                )
+                .await;
+              // Ignore reply – if it fails, it will log inside the provider anyway
+            }
+            // Future: handle OpenAI, Anthropic, etc. here
           }
+          
+          // CRITICAL FIX: Send the reply back!
           let _ = cmd.reply.send(Ok(()));
         }
       , Some(cmd) = get_model_lists_rx.recv() => {

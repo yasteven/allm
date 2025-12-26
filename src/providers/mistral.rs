@@ -1,3 +1,6 @@
+// Don't remove any comments.
+// allm/src/providers/mistral.rs
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use log::{debug, trace, error, info};
@@ -115,8 +118,8 @@ impl MistralClientState
     }
 
     fn set_model_key(&mut self, model: String, key: String)
-    {   debug!("Setting model key for: {}", model);
-        self.model_keys.insert(model, key);
+    { log::debug!("Setting model key for: {}", model);
+      self.model_keys.insert(model, key);
     }
 
     async fn handle_send_prompt(
@@ -241,12 +244,16 @@ impl MistralClientState
     , model_opt: Option<String>
     , key: String
     ) -> Result<(), crate::error::Error>
-    {   if let Some(model) = model_opt
-        {   self.set_model_key(model, key);
-        } else
-        {   self.set_master_key(key);
-        }
-        Ok(())
+    { log::debug!("mistral.rs::handle_set_api_key...");
+      if let Some(model) = model_opt
+      { log::trace!("mistral.rs::handle_set_api_key with specified model");
+        self.set_model_key(model, key);
+      } else
+      { log::trace!("mistral.rs::handle_set_api_key setting master key implictly");
+        self.set_master_key(key);
+      }
+      log::debug!("mistral.rs::handle_set_api_key OK EXIT!");
+      Ok(())
     }
 }
 
